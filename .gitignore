@@ -1,0 +1,12 @@
+.DS_Store
+.Rproj.user/
+.Rhistory
+.RData
+.Ruserdata
+__pycache__/
+*.pyc
+kaanoni-asetukset.json
+output/
+examples/*.rds
+examples/*.txt
+examples/asteikko_testi.*
