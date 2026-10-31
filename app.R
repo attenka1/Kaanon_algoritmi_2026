@@ -43,17 +43,26 @@ ui <- function(request) {
       numericInput('nodes','Korjaushaun tiloja / ehdokas',saved$nodes,min=1)),
     numericInput('seconds','Haun aikaraja (sekuntia)',saved$seconds,min=1,max=600),
     numericInput('candidates','Enintään kokonaisia ehdokkaita',saved$candidates,min=1),
-    numericInput('results','Enintään tuloksia',saved$results,min=1),
+    numericInput('results','Näytä enintään parasta ratkaisua',saved$results,min=1),
+    selectInput('ranking','Hyvyysjärjestyksen painotus',
+      c('Säilytä teema mahdollisimman tarkasti'='balanced',
+        'Suosi konsonoivaa yhteissointia'='consonance',
+        'Suosi pitkää kaikkien äänten yhteissointia'='overlap'),selected=saved$ranking),
+    helpText('Kaikissa järjestyksissä vähemmän harmoniavirheitä on ensin. Painotus ratkaisee sen jälkeen. Valitse painotus ennen hakua.'),
+    checkboxInput('stop_after_results','Pysäytä, kun enimmäismäärä ratkaisuja on löytynyt',saved$stop_after_results),
     helpText('Asetukset tallentuvat automaattisesti ja palautuvat seuraavalla käynnistyskerralla.'),
     actionButton('run','Muodosta ratkaisut',class='btn-primary')
   ),mainPanel(
     p('Aika-arvot mitataan neljasosina. MIDI-sävelkorkeus 60 = keski-C. Alkuperäinen syöte säilyy ennallaan.'),
     h4('Syöte'),verbatimTextOutput('input_summary'),
-    h4('Haun tulos'),p('Haku etsii ensin ilman sävelkorjauksia toimivat vaihtoehdot. Korjausaika jaetaan sen jälkeen ehdokkaiden kesken. Aikaraja voi jättää haun kesken.'),verbatimTextOutput('status'),tableOutput('summary'),
+    h4('Haun tulos'),p('Haun aikana mittari näyttää vaiheen, ajan, nykyisen lähtöteeman, tutkitut ehdokkaat ja ratkaisujen määrän. Palkki kuvaa käytettyä aikabudjettia, ei kaikkien vaihtoehtojen valmistumisprosenttia.'),p('Haku vuorottelee lähtöteemojen välillä ja etsii ensin ilman sävelkorjauksia toimivat vaihtoehdot. Korjausaika jaetaan sen jälkeen ehdokkaiden kesken. Aikaraja voi jättää haun kesken.'),verbatimTextOutput('status'),tableOutput('summary'),
     selectInput('selected','Tarkasteltava ratkaisu',choices=character()),
     tableOutput('settings'),tableOutput('changes'),tableOutput('errors_table'),
     plotOutput('piano',height='350px'),
-    h4('Vienti: kaikki löydetyt ratkaisut peräkkäin'),
+    h4('Vienti: parhaat ratkaisut hyvyysjärjestyksessä'),
+    numericInput('export_best','Vie enintään näin monta parasta ratkaisua',saved$export_best,min=1,step=1),
+    textOutput('export_summary'),
+    p('Jos haluat parhaat koko tutkitusta joukosta, jätä ratkaisumäärään pysäyttävä valinta pois päältä. Nopeasti pysäytetty haku vertailee vain siihen mennessä löytyneitä ratkaisuja.'),
     numericInput('out_num','Tahtilajin osoittaja',saved$out_num,min=1),
     selectInput('out_den','Tahtilajin nimittaja',c(2,4,8,16),selected=saved$out_den),
     numericInput('tempo','Tempo (neljasosia/min)',saved$tempo,min=10,max=300),
@@ -115,17 +124,48 @@ server <- function(input,output,session) {
       metric_mode=if(is.null(input$metric_mode)) 'auto' else input$metric_mode,
       strong_beat_period=if(is.null(input$strong_beat_period)) 2 else input$strong_beat_period,
       max_shift=input$shift,max_changes=input$changes,repair_nodes=input$nodes,
-      seconds=input$seconds,max_candidates=input$candidates,max_results=input$results)
-    r <- withProgress(message='Etsitään ratkaisuja',value=0.2,kaanoni_generate(t,o))
-    updateSelectInput(session,'selected',choices=seq_along(r$results)); r
+      seconds=input$seconds,max_candidates=input$candidates,max_results=input$results,
+      stop_after_results=isTRUE(input$stop_after_results),
+      ranking=if(is.null(input$ranking)) 'balanced' else input$ranking)
+    r <- withProgress(message='Haku käynnistyy',value=0,{
+      kaanoni_generate(t,o,progress=function(p) {
+        stages <- c(start='Haku käynnistyy',scan='Teemayhdistelmien haku',
+          repair='Sävelkorkeuksien korjaushaku',ranking='Tulosten järjestäminen',done='Haku päättynyt')
+        detail <- sprintf('Aika %.0f / %.0f s · teema %d/%d · ehdokkaita %d · ratkaisuja %d',
+          p$elapsed,p$seconds,p$theme,p$themes,p$tested,p$found)
+        if(p$stage=='repair') detail <- paste0(detail,' · korjaushaussa ',p$repair_attempted,'/',p$repair_candidates)
+        setProgress(value=if(p$stage=='done') 1 else min(p$budget_fraction,0.99),
+          message=unname(stages[p$stage]),detail=detail)
+      })
+    })
+    choices <- as.character(seq_along(r$results))
+    updateSelectInput(session,'selected',choices=choices,
+      selected=if(length(choices)>0) choices[1] else character())
+    r
   })
-  selected <- reactive({ r <- result(); req(length(r$results),input$selected); r$results[[as.integer(input$selected)]] })
-  output$status <- renderPrint({ print(result()) })
+  selected <- reactive({
+    r <- result()
+    # Shiny pitaa numeerista nollaa totena: req(length(...)) ei suojaa tyhjaa listaa.
+    req(length(r$results)>0)
+    index <- suppressWarnings(as.numeric(input$selected))
+    req(length(index)==1 && !is.na(index) && is.finite(index) &&
+        index==floor(index) && index>=1 && index<=length(r$results))
+    r$results[[as.integer(index)]]
+  })
+  output$status <- renderPrint({
+    r <- result(); print(r)
+    if(identical(r$status,'result_limit')) cat('Haku pysäytettiin, koska pyydetty ratkaisumäärä löytyi.\n')
+    if(length(r$results)==0) {
+      if(r$status=='search_limit')
+        cat('Haku jäi kesken aika- tai ehdokasrajan vuoksi. Ratkaisuja ei löytynyt tutkitusta osasta.\n')
+      else cat('Valituilla asetuksilla ei löytynyt ratkaisuja.\n')
+    }
+  })
   output$summary <- renderTable({
     r <- result(); if(!length(r$results)) return(NULL)
     do.call(rbind,lapply(seq_along(r$results),function(i) {
       x <- r$results[[i]]; data.frame(Ratkaisu=i,Lahdesavelmuutokset=x$changed_sources,
-      Nuottimuutokset=x$changed_occurrences,Virheet=x$evaluation$harmony,Yhteissointeja=x$evaluation$sonority_count,Konsonanssi=round(x$consonance,3))
+      Nuottimuutokset=x$changed_occurrences,Virheet=x$evaluation$harmony,Yhteissointiaika=x$evaluation$overlap,Yhteissointeja=x$evaluation$sonority_count,Konsonanssi=round(x$consonance,3))
     }))
   })
   output$settings <- renderTable(selected()$settings)
@@ -137,15 +177,28 @@ server <- function(input,output,session) {
     segments(n$onset,n$pitch,n$onset+n$duration,n$pitch,col=n$voice,lwd=4)
     legend('topright',legend=paste('Aani',sort(unique(n$voice))),col=sort(unique(n$voice)),lwd=4)
   })
+  export_result <- reactive({
+    r <- result()
+    count <- input$export_best
+    # Vanhojen asiakkaiden ja testien oletus: koko palautettu tuloslista.
+    if(is.null(count)) count <- length(r$results)
+    req(length(count)==1 && is.finite(count) && count>=1 && count==floor(count))
+    r$results <- head(r$results,count)
+    r
+  })
+  output$export_summary <- renderText({
+    r <- export_result()
+    paste('Tiedostoon viedään',length(r$results),'parasta ratkaisua. Paras on ensimmäisenä.')
+  })
   export <- function(file,ext) {
     p <- tempfile(fileext=ext); on.exit(unlink(c(p,paste0(p,'.txt'),paste0(p,'.rds'))))
-    kaanoni_write(result(),p,gap_bars=input$gap,time=c(input$out_num,as.integer(input$out_den)),tempo=input$tempo)
+    kaanoni_write(export_result(),p,gap_bars=input$gap,time=c(input$out_num,as.integer(input$out_den)),tempo=input$tempo)
     if(!file.exists(p) || !file.copy(p,file,overwrite=TRUE)) stop('Vientitiedoston kopiointi epäonnistui.')
   }
   output$midi <- downloadHandler(filename=function()'kaanoni.mid',contentType='audio/midi',content=function(file)export(file,'.mid'))
   output$xml <- downloadHandler(filename=function()'kaanoni.musicxml',contentType='application/vnd.recordare.musicxml+xml',content=function(file)export(file,'.musicxml'))
   output$report <- downloadHandler(filename=function()'kaanoni-raportti.txt',contentType='text/plain; charset=utf-8',content=function(file) {
-    r <- result(); writeLines(capture.output({print(r); for(x in r$results) {cat('Tyyppi:',x$kind,'Tila:',x$status,'\n');print(x$settings);print(x$changes);print(x$evaluation$errors)}}),file)
+    r <- export_result(); writeLines(capture.output({print(r); for(x in r$results) {cat('Tyyppi:',x$kind,'Tila:',x$status,'\n');print(x$settings);print(x$changes);print(x$evaluation$errors)}}),file)
   })
   # Rekisteroi lataukset myos silloin, kun painikkeet ovat RStudion nakyman ulkopuolella.
   for(id in c('midi','xml','report')) outputOptions(output,id,suspendWhenHidden=FALSE)

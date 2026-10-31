@@ -85,15 +85,18 @@ kaanoni_options <- function(voices=2L, mode='canon', forms='O', factors=1,
     max_harmony_errors=0L, forbid_parallels=TRUE, forbid_crossing=FALSE,
     max_leap=12L, min_overlap=1, repair=FALSE, repair_mode='strict',
     max_shift=2L, max_changes=4L, repair_nodes=500L,
-    max_candidates=10000L, max_results=30L, seconds=30,
+    max_candidates=10000L, max_results=30L, seconds=240,
     dissonances=FALSE, min_sonorities=0L, sonority_mode=c('intervals','chords'),
     allow_weak_steps=FALSE, strong_beat_period=2,
-    metric_mode=c('auto','manual'), meter=NULL) {
+    metric_mode=c('auto','manual'), meter=NULL, stop_after_results=FALSE,
+    ranking=c('balanced','consonance','overlap')) {
   if(!voices %in% 2:4 || length(voices)!=1) stop('Aanimaara on 2–4.')
   mode <- match.arg(mode,c('canon','counterpoint')); repair_mode <- match.arg(repair_mode,c('strict','free'))
   if(!is.logical(allow_weak_steps) || length(allow_weak_steps)!=1 || is.na(allow_weak_steps) ||
      length(strong_beat_period)!=1 || !is.finite(strong_beat_period) || strong_beat_period<=0)
     stop('Tarkista epaiskujen asteikkoliikkeen asetukset.')
+  if(!is.logical(stop_after_results) || length(stop_after_results)!=1 || is.na(stop_after_results)) stop('Virheellinen pysaytysasetus.')
+  ranking <- match.arg(ranking)
   metric_mode <- match.arg(metric_mode)
   sonority_mode <- match.arg(sonority_mode)
   if(voices==2L) sonority_mode <- 'intervals'
@@ -289,13 +292,43 @@ kaanoni_evaluate <- function(n, o) {
        resume=list(queue=queue,seen=seen,visited=visited))
 }
 
-kaanoni_generate <- function(themes, options=kaanoni_options()) {
+# Leksikografinen hyvyysjarjestys: jokainen aiempi kriteeri ratkaisee ennen seuraavaa.
+kaanoni_rank <- function(results,ranking='balanced') {
+  ranking <- match.arg(ranking,c('balanced','consonance','overlap'))
+  if(!length(results)) return(results)
+  key <- function(x) {
+    consonance <- if(is.finite(x$consonance)) x$consonance else -Inf
+    overlap <- if(is.null(x$evaluation$overlap)) 0 else x$evaluation$overlap
+    switch(ranking,
+      balanced=c(x$evaluation$harmony,x$changed_sources,x$movement,-consonance,-overlap),
+      consonance=c(x$evaluation$harmony,-consonance,x$changed_sources,x$movement,-overlap),
+      overlap=c(x$evaluation$harmony,-overlap,x$changed_sources,x$movement,-consonance))
+  }
+  keys <- do.call(rbind,lapply(results,key))
+  results[do.call(order,as.data.frame(keys))]
+}
+
+kaanoni_generate <- function(themes, options=kaanoni_options(), progress=NULL) {
   o <- options; started <- proc.time()[3]; deadline <- started+o$seconds
   # Varaa korjauksille osa kokonaisajasta, mutta etsi ensin korjaamattomat ratkaisut.
   scan_deadline <- if(o$repair) started+o$seconds*0.6 else deadline
   pending <- list(); repair_attempted <- 0L
   results <- list(); seen <- new.env(hash=TRUE,parent=emptyenv()); tested <- 0L; repair_limited <- 0L
   exhausted <- TRUE
+  if(!is.null(progress) && !is.function(progress)) stop('progress on funktio tai NULL.')
+  expanded <- 0L; current_theme <- 0L; last_progress <- -Inf
+  emit_progress <- function(stage,force=FALSE) {
+    now <- proc.time()[3]
+    if(is.null(progress) || (!force && now-last_progress<0.2)) return(invisible(NULL))
+    last_progress <<- now
+    progress(list(stage=stage,elapsed=unname(now-started),seconds=o$seconds,
+      budget_fraction=min(1,(now-started)/o$seconds),
+      theme=current_theme,themes=length(themes),expanded=expanded,
+      tested=tested,candidate_limit=o$max_candidates,found=if(stage=='done') found_total else length(results),
+      repair_attempted=repair_attempted,repair_candidates=length(pending)))
+    invisible(NULL)
+  }
+  emit_progress('start',TRUE)
   add_result <- function(n,ev,delta,settings,status) {
     hash <- paste(n$voice,round(n$onset,8),round(n$duration,8),n$pitch,collapse=';')
     if(exists(hash,seen,inherits=FALSE)) return(invisible(NULL))
@@ -317,53 +350,133 @@ kaanoni_generate <- function(themes, options=kaanoni_options()) {
       changed_sources=changed,changed_occurrences=occurrences,movement=movement,
       consonance=if(total>0) good/total else NA_real_,status=status)
   }
-  search <- function(n,settings,root,voice) {
-    if(proc.time()[3]>=scan_deadline || tested>=o$max_candidates) { exhausted <<- FALSE; return() }
-    if(voice>o$voices) {
-      tested <<- tested+1L; ev <- kaanoni_evaluate(n,o)
-      if(ev$overlap+1e-8<o$min_overlap || ev$sonority_count<o$min_sonorities) return()
-      if(ev$valid) add_result(n,ev,numeric(),settings,'unchanged') else if(o$repair) {
-        pending[[length(pending)+1L]] <<- list(notes=n,evaluation=ev,settings=settings,meter=o$meter,resume=NULL)
-      }
-      return()
+  # Muunnokset muodostetaan laiskasti kerran kutakin aanipaikkaa varten.
+  grid <- expand.grid(p=o$transpositions,d=o$delays,a=o$factors,f=o$forms,
+    t=seq_along(themes),KEEP.OUT.ATTRS=FALSE,stringsAsFactors=FALSE)
+  variants <- new.env(hash=TRUE,parent=emptyenv())
+  pairs <- new.env(hash=TRUE,parent=emptyenv())
+  variant_hits <- pair_hits <- temporal_rejects <- 0L
+  roots_visited <- integer()
+  stopped_results <- FALSE
+  enough <- function() isTRUE(o$stop_after_results) && length(results)>=o$max_results
+  get_variant <- function(id,voice) {
+    key <- paste(voice,id,sep='/')
+    if(exists(key,variants,inherits=FALSE)) {
+      variant_hits <<- variant_hits+1L
+      return(get(key,variants,inherits=FALSE))
     }
-    choices <- if(o$mode=='canon') root else seq_along(themes)
-    for(t in choices) for(f in o$forms) for(a in o$factors) for(d in o$delays) for(p in o$transpositions) {
-      if(proc.time()[3]>=scan_deadline || tested>=o$max_candidates) { exhausted <<- FALSE; return() }
-      x <- .variation(themes[[t]],f,a,d,p,voice)
-      # Identtiset aanet samassa ajassa eivat muodosta uutta kontrapunktia.
-      duplicate <- any(vapply(unique(n$voice),function(v) {
-        old <- n[n$voice==v,]
-        nrow(old)==nrow(x) && all(abs(old$onset-x$onset)<1e-8) &&
-          all(abs(old$duration-x$duration)<1e-8) && all(old$pitch==x$pitch)
-      },logical(1)))
-      if(duplicate) next
-      if(!o$repair && any(x$pitch<o$ranges[[voice]][1] | x$pitch>o$ranges[[voice]][2])) next
-      combined <- rbind(n,x)
-      if(!o$repair) {
-        partial <- kaanoni_evaluate(combined,o)
-        if(partial$hard>0 || (is.null(o$allowed_sets) && partial$harmony>o$max_harmony_errors)) next
-      }
-      search(combined,rbind(settings,data.frame(voice=voice,theme=themes[[t]]$name,form=f,factor=a,delay=d,transposition=p)),root,voice+1L)
-    }
+    g <- grid[id,]
+    x <- .variation(themes[[g$t]],g$f,g$a,g$d,g$p,voice)
+    assign(key,x,variants); x
   }
-  for(t in seq_along(themes)) {
-    o$meter <- themes[[t]]$measures
+  common_duration <- function(n) {
+    ts <- sort(unique(c(n$onset,n$onset+n$duration)))
+    change <- tabulate(match(n$onset,ts),nbins=length(ts))-
+      tabulate(match(n$onset+n$duration,ts),nbins=length(ts))
+    sum(diff(ts)[head(cumsum(change),-1)==length(unique(n$voice))])
+  }
+  pair_score <- function(left,right,left_id,right_id,lv,rv,root) {
+    key <- paste(root,lv,rv,left_id,right_id,sep='/')
+    if(exists(key,pairs,inherits=FALSE)) {
+      pair_hits <<- pair_hits+1L
+      return(get(key,pairs,inherits=FALSE))
+    }
+    po <- o; po$allowed_sets <- NULL
+    e <- kaanoni_evaluate(rbind(left,right),po)
+    value <- c(hard=e$hard,harmony=e$harmony)
+    assign(key,value,pairs); value
+  }
+  # Jokaisen teeman DFS-pino ja seuraavan muunnoksen indeksi sailyvat hakuvuorojen valilla.
+  roots <- lapply(seq_along(themes),function(t) {
     n <- .variation(themes[[t]],voice=1)
     settings <- data.frame(voice=1,theme=themes[[t]]$name,form='O',factor=1,delay=0,transposition=0)
-    search(n,settings,t,2L)
-    if(!exhausted) break
+    list(stack=list(list(notes=n,settings=settings,ids=0L,next_id=1L)),
+      choices=if(o$mode=='canon') which(grid$t==t) else seq_len(nrow(grid)))
+  })
+  while(any(vapply(roots,function(x) length(x$stack)>0,logical(1)))) {
+    if(proc.time()[3]>=scan_deadline || tested>=o$max_candidates || enough()) break
+    for(root in seq_along(roots)) {
+      if(proc.time()[3]>=scan_deadline || tested>=o$max_candidates || enough()) break
+      if(!length(roots[[root]]$stack)) next
+      current_theme <- root
+      first_visit <- !root %in% roots_visited
+      roots_visited <- union(roots_visited,root)
+      if(first_visit) emit_progress('scan',TRUE)
+      o$meter <- themes[[root]]$measures
+      slice_end <- min(scan_deadline,proc.time()[3]+0.10)
+      steps <- 0L
+      while(length(roots[[root]]$stack) && steps<100L && proc.time()[3]<slice_end &&
+            tested<o$max_candidates && !enough()) {
+        depth <- length(roots[[root]]$stack)
+        frame <- roots[[root]]$stack[[depth]]
+        ids <- roots[[root]]$choices
+        if(frame$next_id>length(ids)) {
+          roots[[root]]$stack <- roots[[root]]$stack[-depth]
+          next
+        }
+        id <- ids[frame$next_id]
+        roots[[root]]$stack[[depth]]$next_id <- frame$next_id+1L
+        steps <- steps+1L; expanded <- expanded+1L; emit_progress('scan')
+        voice <- length(frame$ids)+1L
+        x <- get_variant(id,voice); n <- frame$notes
+        duplicate <- any(vapply(unique(n$voice),function(v) {
+          old <- n[n$voice==v,]
+          nrow(old)==nrow(x) && all(abs(old$onset-x$onset)<1e-8) &&
+            all(abs(old$duration-x$duration)<1e-8) && all(old$pitch==x$pitch)
+        },logical(1)))
+        if(duplicate) next
+        if(!o$repair && any(x$pitch<o$ranges[[voice]][1] | x$pitch>o$ranges[[voice]][2])) next
+        combined <- rbind(n,x)
+        # Lisattava aani voi vain vahentaa kaikkien aanten yhteista soivaa aikaa.
+        if(common_duration(combined)+1e-8<o$min_overlap) {
+          temporal_rejects <- temporal_rejects+1L; next
+        }
+        if(!o$repair) {
+          harmony <- 0L; bad <- FALSE
+          for(v in seq_len(voice-1L)) {
+            e <- pair_score(n[n$voice==v,],x,frame$ids[v],id,v,voice,root)
+            harmony <- harmony+e['harmony']
+            if(e['hard']>0 || harmony>o$max_harmony_errors) { bad <- TRUE; break }
+          }
+          if(bad) next
+          # Vanhojen aaniparien virheetkin kuluttavat yhteista virhebudjettia.
+          total_harmony <- (if(is.null(frame$harmony)) 0 else frame$harmony)+harmony
+          if(total_harmony>o$max_harmony_errors) next
+        } else total_harmony <- 0
+        g <- grid[id,]
+        settings <- rbind(frame$settings,data.frame(voice=voice,theme=themes[[g$t]]$name,
+          form=g$f,factor=g$a,delay=g$d,transposition=g$p))
+        if(voice==o$voices) {
+          tested <- tested+1L
+          # Lopullinen tarkistus on aina sama kaikissa hakutavoissa.
+          ev <- kaanoni_evaluate(combined,o)
+          if(ev$sonority_count<o$min_sonorities) next
+          if(ev$valid) add_result(combined,ev,numeric(),settings,'unchanged') else if(o$repair) {
+            pending[[length(pending)+1L]] <- list(notes=combined,evaluation=ev,
+              settings=settings,meter=o$meter,resume=NULL)
+          }
+        } else {
+          roots[[root]]$stack[[depth+1L]] <- list(notes=combined,settings=settings,
+            ids=c(frame$ids,id),next_id=1L,harmony=total_harmony)
+        }
+      }
+    }
   }
+  stopped_results <- enough()
+  exhausted <- !any(vapply(roots,function(x) length(x$stack)>0,logical(1)))
   # Korjaa ehdokkaita vuorotellen. Vaikea ensimmainen ehdokas ei saa koko aikabudjettia.
-  if(length(pending)) {
+  if(length(pending) && !enough()) {
+    emit_progress('repair',TRUE)
     rank <- do.call(rbind,lapply(pending,function(x) c(x$evaluation$hard,x$evaluation$harmony)))
     pending <- pending[do.call(order,as.data.frame(rank))]
     active <- seq_along(pending)
-    while(length(active) && proc.time()[3]<deadline) {
+    while(length(active) && proc.time()[3]<deadline && !enough()) {
       next_round <- integer()
       for(i in active) {
-        if(proc.time()[3]>=deadline) break
+        if(proc.time()[3]>=deadline || enough()) break
         candidate <- pending[[i]]
+        current_theme <- match(candidate$settings$theme[1],vapply(themes,function(x)x$name,character(1)))
+        emit_progress('repair')
         if(is.null(candidate$resume)) repair_attempted <- repair_attempted+1L
         repair_options <- o; repair_options$meter <- candidate$meter
         rr <- .repair(candidate$notes,repair_options,min(deadline,proc.time()[3]+0.15),
@@ -380,14 +493,18 @@ kaanoni_generate <- function(themes, options=kaanoni_options()) {
     }
     repair_limited <- sum(!vapply(pending,function(x) isTRUE(x$done),logical(1)))
   }
+  stopped_results <- enough()
+  emit_progress('ranking',TRUE)
   found_total <- length(results)
   unchanged_found <- sum(vapply(results,function(x) x$status=='unchanged',logical(1)))
   if(length(results)) {
-    rank <- do.call(rbind,lapply(results,function(x) c(x$evaluation$harmony,x$changed_sources,x$movement,-x$consonance)))
-    results <- results[head(do.call(order,as.data.frame(rank)),o$max_results)]
+    results <- head(kaanoni_rank(results,if(is.null(o$ranking)) 'balanced' else o$ranking),o$max_results)
   }
-  structure(list(results=results,tested=tested,found_total=found_total,unchanged_found=unchanged_found,repair_limited=repair_limited,
-    status=if(exhausted && !o$repair) 'exhaustive' else if(exhausted && repair_limited==0) 'geometry_exhausted_heuristic_repair' else 'search_limit',
+  emit_progress('done',TRUE)
+  structure(list(elapsed=unname(proc.time()[3]-started),results=results,tested=tested,found_total=found_total,unchanged_found=unchanged_found,repair_limited=repair_limited,
+    stats=list(expanded=expanded,roots_visited=roots_visited,variant_cache_hits=variant_hits,
+      pair_cache_hits=pair_hits,temporal_rejects=temporal_rejects),
+    status=if(stopped_results) 'result_limit' else if(exhausted && !o$repair) 'exhaustive' else if(exhausted && repair_limited==0) 'geometry_exhausted_heuristic_repair' else 'search_limit',
     repair_attempted=repair_attempted,options=o),class='kaanoni_result')
 }
 
@@ -404,8 +521,14 @@ print.kaanoni_result <- function(x,...) {
   invisible(x)
 }
 
-kaanoni_write <- function(result,path,gap_bars=1,time=c(4,4),tempo=60) {
+kaanoni_write <- function(result,path,gap_bars=1,time=c(4,4),tempo=60,best_n=NULL) {
   if(!length(result$results)) stop('Ei vietavia ratkaisuja.')
+  result$results <- kaanoni_rank(result$results,if(is.null(result$options$ranking)) 'balanced' else result$options$ranking)
+  if(!is.null(best_n)) {
+    if(length(best_n)!=1 || !is.finite(best_n) || best_n<1 || best_n!=floor(best_n))
+      stop('Vietavien ratkaisujen maara on positiivinen kokonaisluku.')
+    result$results <- head(result$results,best_n)
+  }
   if(length(time)!=2 || any(time<=0) || gap_bars<0 || tempo<=0) stop('Virheelliset vientiasetukset.')
   bar <- time[1]*4/time[2]; cursor <- 0; all <- list(); labels <- list()
   for(i in seq_along(result$results)) {

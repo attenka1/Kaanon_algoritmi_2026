@@ -27,6 +27,29 @@ shiny::testServer(server, {
   stopifnot(file.exists(local_file),tools::file_ext(local_file)=='musicxml')
   stopifnot(nrow(kaanoni_read(local_file)$notes)>0)
   unlink(local_file)
+  session$setInputs(export_best=1)
+  best_download <- output$xml
+  stopifnot(nrow(kaanoni_read(best_download)$notes)==nrow(result()$results[[1]]$notes),
+            length(export_result()$results)==1)
+  # Virheellinen tai edellisen haun liian suuri valinta ei saa indeksoida listaa.
+  for(value in c('99999','0','-1','1.5','bad','')) {
+    session$setInputs(selected=value)
+    error <- tryCatch(selected(),error=identity)
+    stopifnot(inherits(error,'shiny.silent.error'))
+  }
+  session$setInputs(selected='1')
+  stopifnot(selected()$evaluation$valid)
+  # Uusi haku palauttaa tyhjan listan, vaikka vanha valinta on yha selaimessa.
+  session$setInputs(min_sonorities=100000,run=2)
+  stopifnot(length(result()$results)==0)
+  error <- tryCatch(selected(),error=identity)
+  stopifnot(inherits(error,'shiny.silent.error'),
+            !grepl('subscript out of bounds',conditionMessage(error),fixed=TRUE))
+  stopifnot(grepl('ei löytynyt',output$status,fixed=TRUE))
+  for(id in c('settings','changes','errors_table','piano')) {
+    value <- tryCatch(output[[id]],error=identity)
+    stopifnot(!inherits(value,'error') || inherits(value,'shiny.silent.error'))
+  }
 })
 cat('Shiny input and search OK\n')
 

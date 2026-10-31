@@ -14,6 +14,36 @@ Käyttöliittymässä voi ladata MIDI-, MusicXML- tai pakatun MXL-tiedoston, val
 
 Tarvitaan R, Shiny-paketti ja komentopolusta löytyvä Python 3. MusicXML-vienti ei tarvitse Python 3.9:n `math.lcm`- tai `ElementTree.indent`-funktioita, joten myös vanhempi RStudion löytämä Python toimii. Tiedostojen luku ja vienti käyttävät vain Pythonin vakiokirjastoa. Käyttöliittymä tekee haun paikallisessa R-prosessissa, joten se odottaa haun valmistumista aikarajaan asti.
 
+## Hyvyysjärjestys ja parhaiden vienti
+
+Kaikki hyväksyttävät ratkaisut järjestetään ennen näytettävän enimmäismäärän rajaamista. Vähemmän harmoniavirheitä on aina parempi. Sen jälkeen voi valita painotuksen:
+
+- **Säilytä teema mahdollisimman tarkasti** (`ranking='balanced'`): vähemmän muutettuja lähdesäveliä, pienempi kokonaismuutos, suurempi kestopainotettu konsonanssi ja pidempi kaikkien äänten yhteissointi.
+- **Suosi konsonoivaa yhteissointia** (`ranking='consonance'`): suurempi kestopainotettu konsonanssi, vähemmän lähdesävelmuutoksia, pienempi kokonaismuutos ja pidempi yhteissointi.
+- **Suosi pitkää kaikkien äänten yhteissointia** (`ranking='overlap'`): pidempi yhteissointi, vähemmän lähdesävelmuutoksia, pienempi kokonaismuutos ja suurempi konsonanssi.
+
+Kriteerit ovat tärkeysjärjestyksessä: aiempi kriteeri ratkaisee ennen seuraavaa. Painotus valitaan ennen hakua. Täysin tasavertaiset ratkaisut säilyttävät löytöjärjestyksensä. Hyvyys tarkoittaa näitä mitattavia ominaisuuksia; arvio ei ole yleinen sävellyksellisen laadun mittari.
+
+**Näytä enintään parasta ratkaisua** rajaa hausta palautettavan listan. Viennin erillinen **Vie enintään näin monta parasta ratkaisua** (oletus 10) määrää MIDI-, MusicXML- ja raporttitulosteiden määrän listan alusta. Vientimäärää voi muuttaa ilman uutta hakua. R-rajapinnassa vastaava valinta on `kaanoni_write(tulos,polku,best_n=10)`. Jos ratkaisuja on vähemmän, viedään kaikki saatavilla olevat.
+
+Ratkaisumäärään pysäyttävä nopea haku kannattaa jättää pois, kun halutaan vertailla laajempaa joukkoa. Parhaat tarkoittavat aina parhaimpia haussa löytyneiden joukosta, eivät todistetusti koko hakuavaruuden parhaita.
+
+## Nopeutettu haku
+
+Lähtöteemoja käsitellään vuorotellen noin 0,1 sekunnin / enintään 100 muunnoskokeilun erissä. Jokaisen teeman hakupino ja seuraava kokeiltava muunnos säilyvät vuorojen välillä. Kaikille teemoille annetaan vuoro, jos kokonaisaika tai ehdokasraja ei täyty jo ennen sitä.
+
+Teemamuunnokset muodostetaan laiskasti ja säilytetään muistissa. Jo valittujen äänten yhteinen soiva aika tarkastetaan ennen harmoniaa: jos se on liian lyhyt, haara ei voi kelvata lisä-ääniäkään lisäämällä. Ääniparien harmonia- ja äänenkuljetustulokset tallennetaan välimuistiin, ja uusia ääniä liitetään vain yhteisen harmoniavirhebudjetin sallimissa rajoissa. Lopullinen kokonaisuus käy aina läpi alkuperäisen kokonaisarvioinnin, mukaan lukien sointujoukkorajoitukset ja yhteissointien lukumäärä. Sävelkorjaushaussa parien alkuperäisiä virheitä ei käytetä ehdottomaan karsintaan, koska ne voivat korjaantua.
+
+Valintaruutu **Pysäytä, kun enimmäismäärä ratkaisuja on löytynyt** (`stop_after_results=TRUE`) lopettaa haun heti ratkaisumäärän täyttyessä. Tila on tällöin `result_limit`. Oletuksena valinta on pois päältä, jolloin haku käyttää annetut rajat ja järjestää löydetyt ratkaisut kuten aiemmin. Nopea pysäytys ei lupaa löytää koko hakuavaruuden parhaita ratkaisuja.
+
+Tulosolion `stats` kertoo käydyt lähtöteemat, muunnos- ja parivälimuistien osumat sekä aikakarsintojen määrän. Automaattinen vertailutesti varmistaa pienissä 2–4-äänisissä hauissa samat ratkaisut kuin kaikkien kokonaisten yhdistelmien suorassa läpikäynnissä.
+
+## Haun seuranta
+
+Oletusaikaraja on 240 sekuntia. Haun aikana päivittyvä Shiny-mittari näyttää vaiheen (teemayhdistelmät, sävelkorjaukset tai järjestäminen), kuluneen ajan, aikarajan, lähtöteeman numeron, tutkittujen kokonaisten ehdokkaiden määrän ja löytyneet ratkaisut. Korjausvaiheessa näytetään myös käsiteltyjen korjausehdokkaiden määrä. Palkki kuvaa käytettyä aikabudjettia; se ei ole hakupuun valmistumisprosentti eikä arvio jäljellä olevasta työajasta. Haku voi valmistua ennen aikarajaa.
+
+R-rajapinnassa `kaanoni_generate(..., progress=function(p) {...})` välittää samat tiedot ilman Shiny-riippuvuutta. Päivityksiä rajoitetaan noin viiteen sekunnissa vaiheenvaihtojen lisäksi.
+
 ## Asetusten säilyminen
 
 Kaikki haku- ja vientiasetukset tallentuvat automaattisesti projektikansion `kaanoni-asetukset.json`-tiedostoon heti valintojen muuttuessa. Tallennus ei vaadi hakua eikä ohjelman hallittua sulkemista. Asetukset palautuvat myös RStudion tai tietokoneen uudelleenkäynnistyksen jälkeen. Viimeisin muutettu asetusvalikoima on yhteinen tämän projektin ikkunoille. Nuottitiedosto valitaan uudelleen; hakutuloksia ei palauteta automaattisesti.
@@ -110,6 +140,9 @@ Rscript tests/test_settings.R
 Rscript tests/test_sonorities.R
 Rscript tests/test_weak_steps.R
 python3 tests/test_python_compat.py
+Rscript tests/test_progress.R
+Rscript tests/test_search_optimized.R
+Rscript tests/test_ranking.R
 ```
 
 Testit kattavat teemajaon ja lopputauot, O/I/R/RI-muunnokset, rytmikertoimet, harmoniaa ja rinnakkaisliikettä, tiukan kaanonin korjauksen, 2–4 ääntä sekä MIDI- ja MusicXML-takaisinluvun. Automaattiset testit eivät vielä korvaa MusicXML:n ulkoista nuotinnusohjelmassa tehtävää visuaalista tarkistusta.
