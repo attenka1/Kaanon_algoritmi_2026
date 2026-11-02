@@ -63,7 +63,7 @@ for(ext in c('mid','musicxml')) {
 # MusicXML:n tahtirajan yli sidottu nuotti palautuu yhdeksi nuotiksi.
 long <- constant[[1]]; long$notes <- long$notes[1,,drop=FALSE]; long$notes$duration <- 6
 long$span <- 8
-result2 <- kaanoni_generate(list(long),kaanoni_options(delays=0,transpositions=12,seconds=2))
+result2 <- kaanoni_generate(list(long),kaanoni_options(delays=0,transpositions=4,seconds=2))
 p <- file.path(tmp,'ties.musicxml'); kaanoni_write(result2,p)
 b <- kaanoni_read(p)
 check(nrow(b$notes)==2 && all(b$notes$duration==6))
@@ -78,7 +78,7 @@ check(limited$status=='search_limit')
 for(v in 3:4) {
   o <- kaanoni_options(voices=v,repair=TRUE,forbid_parallels=FALSE,
     allowed_intervals=0:11,max_leap=0,max_shift=2,max_changes=2,repair_nodes=100)
-  a <- do.call(rbind,lapply(seq_len(v),function(j) .variation(x,voice=j,transposition=12*(j-1))))
+  a <- do.call(rbind,lapply(seq_len(v),function(j) .variation(x,voice=j,delay=(j-1)/4,transposition=12*(j-1))))
   rr <- .repair(a,o,proc.time()[3]+5)
   check(rr$evaluation$valid && any(rr$delta!=0))
   check(length(unique(rr$notes$pitch-rr$notes$base))<=2)

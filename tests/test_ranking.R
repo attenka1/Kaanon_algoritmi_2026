@@ -20,7 +20,8 @@ for(ext in c('mid','musicxml')) {
  path <- file.path(folder,paste0('best.',ext))
  kaanoni_write(r,path,best_n=2)
  exported <- readRDS(paste0(path,'.rds'))
- stopifnot(length(exported$results)==2,identical(exported$results,expected))
+ original_results <- lapply(exported$results,function(x) {x$export_notes<-NULL;x$voice_map<-NULL;x$written_voices<-NULL;x})
+ stopifnot(length(exported$results)==2,identical(original_results,expected))
  stopifnot(nrow(kaanoni_read(path)$notes)==sum(vapply(expected,function(x)nrow(x$notes),integer(1))))
 }
 unlink(folder,recursive=TRUE)

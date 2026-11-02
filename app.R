@@ -8,10 +8,19 @@ ui <- function(request) {
   sidebarLayout(sidebarPanel(
     fileInput('file','MIDI tai MusicXML',accept=c('.mid','.midi','.xml','.musicxml','.mxl')),
     textInput('source_voices','Syötteen äänet (tyhjä = kaikki)',saved$source_voices),
+    checkboxInput('phrase_chain','Säkeet peräkkäisinä kaksiäänisinä kaanoneina',saved$phrase_chain),
+    conditionalPanel('input.phrase_chain',
+      numericInput('phrase_bars','Tahteja säejaksossa',saved$phrase_bars,min=1,step=1),
+      checkboxInput('phrase_same_interval','Sama alkuintervalli kaikissa säkeissä',saved$phrase_same_interval),
+      numericInput('phrase_errors','Sallittuja harmoniavirheitä kussakin säkeessä',saved$phrase_errors,min=0,step=1),
+      helpText('Valitse yksi syötemelodia. Alkuintervalli voidaan pitää samana tai valita jokaiselle säkeelle erikseen transpositiolistasta. Sisääntuloviive ja muut sallitut muunnokset voivat vaihdella. Jos vastaääni jatkuu säejaksoa pidemmälle, seuraavan säkeen alku siirretään seuraavalle vapaalle tahtirajalle.')),
+    conditionalPanel('!input.phrase_chain',
     checkboxInput('single','Koko melodia yhtenä teemana',saved$single),
     conditionalPanel('!input.single',numericInput('bars','Tahteja teemajaksossa',saved$bars,min=1,step=1)),
     selectInput('mode','Haku',c('Kaanon'='canon','Eri teemojen kontrapunkti'='counterpoint'),selected=saved$mode),
     selectInput('voices','Äänimäärä',2:4,selected=saved$voices),
+    helpText('Äänimäärä tarkoittaa erillisiä teemoja: samanaikainen unisono- tai oktaavikaksinnus ei täytä lisä-äänen paikkaa.'),
+    ),
     checkboxGroupInput('forms','Teemavariaatiot (O on aina mukana)',c('I','R','RI'),selected=saved$forms),
     checkboxGroupInput('factors','Rytmikertoimet',c('1/2'='0.5','1'='1','2'='2'),selected=saved$factors),
     numericInput('delay_min','Pienin sisääntuloviive (neljasosia)',saved$delay_min,min=0,step=0.25),
@@ -34,7 +43,7 @@ ui <- function(request) {
     checkboxInput('parallels','Kiellä rinnakkaiset kvintit ja oktaavit',saved$parallels),
     checkboxInput('crossing','Kiellä äänten risteäminen (1 = ylin)',saved$crossing),
     numericInput('leap','Suurin melodinen hyppy (puolisävelaskelia)',saved$leap,min=0),
-    numericInput('errors','Sallittuja harmoniavirheitä',saved$errors,min=0),
+    conditionalPanel('!input.phrase_chain',numericInput('errors','Sallittuja harmoniavirheitä',saved$errors,min=0)),
     checkboxInput('repair','Korjaa sävelkorkeuksia',saved$repair),
     conditionalPanel('input.repair',
       selectInput('repair_mode','Korjaustapa',c('Yhteinen lähdeteema: tiukka kaanon'='strict','Äänet erikseen: vapaa kontrapunkti'='free'),selected=saved$repair_mode),
@@ -62,6 +71,10 @@ ui <- function(request) {
     h4('Vienti: parhaat ratkaisut hyvyysjärjestyksessä'),
     numericInput('export_best','Vie enintään näin monta parasta ratkaisua',saved$export_best,min=1,step=1),
     textOutput('export_summary'),
+    checkboxInput('merge_duplicates','Kirjoita samanaikaiset identtiset äänet vain kerran',saved$merge_duplicates),
+    conditionalPanel('input.merge_duplicates',
+      checkboxInput('merge_octaves','Yhdistä myös samanaikaiset oktaavikahdennukset',saved$merge_octaves)),
+    helpText('Yhdistetään vain koko säveljonoltaan ja rytmiltään vastaavat äänet samalla alkuajalla. Pienempiääninen alivariantti säilyy. Haun pisteytys perustuu alkuperäiseen äänimäärään.'),
     p('Jos haluat parhaat koko tutkitusta joukosta, jätä ratkaisumäärään pysäyttävä valinta pois päältä. Nopeasti pysäytetty haku vertailee vain siihen mennessä löytyneitä ratkaisuja.'),
     numericInput('out_num','Tahtilajin osoittaja',saved$out_num,min=1),
     selectInput('out_den','Tahtilajin nimittaja',c(2,4,8,16),selected=saved$out_den),
@@ -105,7 +118,7 @@ server <- function(input,output,session) {
     kaanoni_read(p,vs)
   })
   output$input_summary <- renderPrint({
-    a <- loaded(); t <- kaanoni_themes(a,if(input$single) NULL else input$bars)
+    a <- loaded(); t <- kaanoni_themes(a,if(isTRUE(input$phrase_chain)) input$phrase_bars else if(input$single) NULL else input$bars)
     cat(nrow(a$notes),'nuottia;',length(t),'teemaa; aanet',paste(unique(a$notes$voice),collapse=', '),'\n')
     cat('Tahtilajit:',paste(unique(paste(a$measures$numerator,a$measures$denominator,sep='/')),collapse=', '),'\n')
     cat('Jaksojen pituudet:',paste(vapply(t,function(x)x$span,numeric(1)),collapse=', '),'neljasosaa\n')
@@ -113,12 +126,12 @@ server <- function(input,output,session) {
   result <- eventReactive(input$run,{
     validate(need(input$delay_step>0 && input$delay_max>=input$delay_min,'Tarkista viiveiden rajat ja askel.'),
              need(length(input$factors)>0,'Valitse rytmikerroin.'))
-    t <- kaanoni_themes(loaded(),if(input$single) NULL else input$bars)
-    o <- kaanoni_options(voices=as.integer(input$voices),mode=input$mode,forms=input$forms,
+    t <- kaanoni_themes(loaded(),if(isTRUE(input$phrase_chain)) input$phrase_bars else if(input$single) NULL else input$bars)
+    o <- kaanoni_options(voices=if(isTRUE(input$phrase_chain)) 2L else as.integer(input$voices),mode=if(isTRUE(input$phrase_chain)) 'canon' else input$mode,forms=input$forms,
       factors=as.numeric(input$factors),delays=seq(input$delay_min,input$delay_max,by=input$delay_step),
-      transpositions=parse_numbers(input$transpositions),ranges=rep(list(c(input$low,input$high)),as.integer(input$voices)),
+      transpositions=parse_numbers(input$transpositions),ranges=rep(list(c(input$low,input$high)),if(isTRUE(input$phrase_chain)) 2L else as.integer(input$voices)),
       min_overlap=input$overlap,min_sonorities=if(is.null(input$min_sonorities)) 0 else input$min_sonorities,
-      sonority_mode=if(is.null(input$sonority_mode)) 'intervals' else input$sonority_mode,max_harmony_errors=input$errors,forbid_parallels=input$parallels,
+      sonority_mode=if(is.null(input$sonority_mode)) 'intervals' else input$sonority_mode,max_harmony_errors=if(isTRUE(input$phrase_chain)) input$phrase_errors else input$errors,forbid_parallels=input$parallels,
       forbid_crossing=input$crossing,max_leap=input$leap,repair=input$repair,repair_mode=input$repair_mode,
       allow_weak_steps=isTRUE(input$allow_weak_steps),
       metric_mode=if(is.null(input$metric_mode)) 'auto' else input$metric_mode,
@@ -128,15 +141,18 @@ server <- function(input,output,session) {
       stop_after_results=isTRUE(input$stop_after_results),
       ranking=if(is.null(input$ranking)) 'balanced' else input$ranking)
     r <- withProgress(message='Haku käynnistyy',value=0,{
-      kaanoni_generate(t,o,progress=function(p) {
-        stages <- c(start='Haku käynnistyy',scan='Teemayhdistelmien haku',
+      progress_callback <- function(p) {
+        stages <- c(phrases='Säekaanonien haku',start='Haku käynnistyy',scan='Teemayhdistelmien haku',
           repair='Sävelkorkeuksien korjaushaku',ranking='Tulosten järjestäminen',done='Haku päättynyt')
         detail <- sprintf('Aika %.0f / %.0f s · teema %d/%d · ehdokkaita %d · ratkaisuja %d',
           p$elapsed,p$seconds,p$theme,p$themes,p$tested,p$found)
         if(p$stage=='repair') detail <- paste0(detail,' · korjaushaussa ',p$repair_attempted,'/',p$repair_candidates)
         setProgress(value=if(p$stage=='done') 1 else min(p$budget_fraction,0.99),
           message=unname(stages[p$stage]),detail=detail)
-      })
+      }
+      if(isTRUE(input$phrase_chain)) kaanoni_phrase_chain(loaded(),input$phrase_bars,o,progress_callback,
+        same_transposition=!identical(input$phrase_same_interval,FALSE)) else
+        kaanoni_generate(t,o,progress=progress_callback)
     })
     choices <- as.character(seq_along(r$results))
     updateSelectInput(session,'selected',choices=choices,
@@ -184,7 +200,8 @@ server <- function(input,output,session) {
     if(is.null(count)) count <- length(r$results)
     req(length(count)==1 && is.finite(count) && count>=1 && count==floor(count))
     r$results <- head(r$results,count)
-    r
+    kaanoni_prepare_export(r,merge_duplicates=!identical(input$merge_duplicates,FALSE),
+      merge_octaves=isTRUE(input$merge_octaves))
   })
   output$export_summary <- renderText({
     r <- export_result()
@@ -192,13 +209,14 @@ server <- function(input,output,session) {
   })
   export <- function(file,ext) {
     p <- tempfile(fileext=ext); on.exit(unlink(c(p,paste0(p,'.txt'),paste0(p,'.rds'))))
-    kaanoni_write(export_result(),p,gap_bars=input$gap,time=c(input$out_num,as.integer(input$out_den)),tempo=input$tempo)
+    kaanoni_write(export_result(),p,gap_bars=input$gap,time=c(input$out_num,as.integer(input$out_den)),tempo=input$tempo,
+      merge_duplicates=!identical(input$merge_duplicates,FALSE),merge_octaves=isTRUE(input$merge_octaves))
     if(!file.exists(p) || !file.copy(p,file,overwrite=TRUE)) stop('Vientitiedoston kopiointi epäonnistui.')
   }
   output$midi <- downloadHandler(filename=function()'kaanoni.mid',contentType='audio/midi',content=function(file)export(file,'.mid'))
   output$xml <- downloadHandler(filename=function()'kaanoni.musicxml',contentType='application/vnd.recordare.musicxml+xml',content=function(file)export(file,'.musicxml'))
   output$report <- downloadHandler(filename=function()'kaanoni-raportti.txt',contentType='text/plain; charset=utf-8',content=function(file) {
-    r <- export_result(); writeLines(capture.output({print(r); for(x in r$results) {cat('Tyyppi:',x$kind,'Tila:',x$status,'\n');print(x$settings);print(x$changes);print(x$evaluation$errors)}}),file)
+    r <- export_result(); writeLines(capture.output({print(r); for(x in r$results) {cat('Tyyppi:',x$kind,'Tila:',x$status,'Kirjoitettuja aania:',x$written_voices,'\n');print(x$voice_map);print(x$settings);print(x$changes);print(x$evaluation$errors)}}),file)
   })
   # Rekisteroi lataukset myos silloin, kun painikkeet ovat RStudion nakyman ulkopuolella.
   for(id in c('midi','xml','report')) outputOptions(output,id,suspendWhenHidden=FALSE)

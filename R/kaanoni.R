@@ -89,13 +89,15 @@ kaanoni_options <- function(voices=2L, mode='canon', forms='O', factors=1,
     dissonances=FALSE, min_sonorities=0L, sonority_mode=c('intervals','chords'),
     allow_weak_steps=FALSE, strong_beat_period=2,
     metric_mode=c('auto','manual'), meter=NULL, stop_after_results=FALSE,
-    ranking=c('balanced','consonance','overlap')) {
+    ranking=c('balanced','consonance','overlap'), parallel_gap_tolerance=0.125) {
   if(!voices %in% 2:4 || length(voices)!=1) stop('Aanimaara on 2–4.')
   mode <- match.arg(mode,c('canon','counterpoint')); repair_mode <- match.arg(repair_mode,c('strict','free'))
   if(!is.logical(allow_weak_steps) || length(allow_weak_steps)!=1 || is.na(allow_weak_steps) ||
      length(strong_beat_period)!=1 || !is.finite(strong_beat_period) || strong_beat_period<=0)
     stop('Tarkista epaiskujen asteikkoliikkeen asetukset.')
   if(!is.logical(stop_after_results) || length(stop_after_results)!=1 || is.na(stop_after_results)) stop('Virheellinen pysaytysasetus.')
+  if(length(parallel_gap_tolerance)!=1 || !is.finite(parallel_gap_tolerance) || parallel_gap_tolerance<0)
+    stop('Rinnakkaisliikkeiden katkotoleranssin on oltava ei-negatiivinen.')
   ranking <- match.arg(ranking)
   metric_mode <- match.arg(metric_mode)
   sonority_mode <- match.arg(sonority_mode)
@@ -173,16 +175,32 @@ kaanoni_pc_key <- function(p) {
   abs(a) %in% 1:2 && abs(b) %in% 1:2 && a*b>0
 }
 
+.same_octave_voice <- function(a,b) {
+  if(!nrow(a) || nrow(a)!=nrow(b)) return(FALSE)
+  a <- a[order(a$onset),]; b <- b[order(b$onset),]
+  if(any(abs(a$onset-b$onset)>1e-8) || any(abs(a$duration-b$duration)>1e-8)) return(FALSE)
+  d <- a$pitch-b$pitch
+  length(unique(d))==1L && d[1]%%12==0
+}
+
 kaanoni_evaluate <- function(n, o) {
   empty <- data.frame(type=character(),start=numeric(),end=numeric(),voices=character(),notes=character(),detail=character())
   errors <- empty
   add <- function(type,a,b,vs,rs,detail) {
     errors[nrow(errors)+1,] <<- list(type,a,b,paste(vs,collapse=','),paste(rs,collapse=','),detail)
   }
+  voice_ids <- sort(unique(n$voice))
+  if(length(voice_ids)>1) for(pair in combn(voice_ids,2,simplify=FALSE)) {
+    a <- n[n$voice==pair[1],]; b <- n[n$voice==pair[2],]
+    if(.same_octave_voice(a,b)) add('doubling',min(a$onset),max(a$onset+a$duration),pair,
+      which(n$voice %in% pair),'Sama teema samanaikaisesti unisonossa tai oktaavissa')
+  }
   times <- sort(unique(round(c(n$onset,n$onset+n$duration),9)))
   strong_times <- if(isTRUE(o$allow_weak_steps) && identical(o$metric_mode,'auto'))
     .metric_strong_times(o$meter,max(times)) else NULL
-  overlap <- 0; previous <- NULL
+  overlap <- 0
+  parallel_history <- new.env(hash=TRUE,parent=emptyenv())
+  gap_tolerance <- if(is.null(o$parallel_gap_tolerance)) 0.125 else o$parallel_gap_tolerance
   counted_pairs <- character(); counted_chords <- character()
   for(k in seq_len(length(times)-1)) {
     t <- times[k]; end <- times[k+1]
@@ -193,7 +211,9 @@ kaanoni_evaluate <- function(n, o) {
       if(o$voices>=3L) counted_chords <- union(counted_chords,paste(sort(rows),collapse=','))
     }
     if(nrow(active)>1) for(pair in combn(seq_len(nrow(active)),2,simplify=FALSE)) {
-      q <- active[pair,]; rs <- rows[pair]; int <- abs(diff(q$pitch))%%12
+      q <- active[pair,]; rs <- rows[pair]
+      ordering <- order(q$voice);q <- q[ordering,];rs <- rs[ordering]
+      int <- abs(diff(q$pitch))%%12
       counted_pairs <- union(counted_pairs,paste(sort(rs),collapse=','))
       ok <- int %in% o$allowed_intervals
       if(!ok && isTRUE(o$allow_weak_steps)) {
@@ -217,18 +237,22 @@ kaanoni_evaluate <- function(n, o) {
       if(!ok) add('harmony',t,end,q$voice,rs,paste0('interval=',int))
       if(o$forbid_crossing && q$pitch[order(q$voice)][1]<q$pitch[order(q$voice)][2])
         add('crossing',t,end,q$voice,rs,'Aanten jarjestys rikkoutuu')
-      if(o$forbid_parallels && !is.null(previous)) {
-        old <- previous[match(q$voice,previous$voice),,drop=FALSE]
-        if(!anyNA(old$pitch)) {
+      if(o$forbid_parallels) {
+        # Muisti aaniparia kohti: note-off tai muun aanen tapahtuma ei saa unohtaa intervallia.
+        key <- paste(q$voice,collapse=',')
+        if(exists(key,parallel_history,inherits=FALSE)) {
+          old <- get(key,parallel_history,inherits=FALSE)
           movement <- q$pitch-old$pitch
-          if(all(movement!=0) && prod(movement)>0 && int %in% c(0,7) && abs(diff(old$pitch))%%12==int)
-            add('parallel',t,end,q$voice,rs,'Rinnakkainen kvintti tai oktaavi')
+          if(t-old$until<=gap_tolerance+1e-8 && all(movement!=0) &&
+             prod(movement)>0 && int %in% c(0,7) && old$interval==int)
+            add('parallel',t,end,q$voice,rs,'Rinnakkainen kvintti tai oktaavi (myos lyhyen artikulaatiokatkon yli)')
         }
+        assign(key,list(pitch=q$pitch,interval=int,
+          until=min(q$onset+q$duration)),parallel_history)
       }
     }
     if(nrow(active)>1 && !is.null(o$allowed_sets) && !kaanoni_pc_key(active$pitch) %in% o$allowed_sets)
       add('set',t,end,active$voice,rows,kaanoni_pc_key(active$pitch))
-    previous <- active
   }
   for(v in seq_len(o$voices)) {
     rs <- which(n$voice==v); a <- n[rs,]
@@ -304,7 +328,8 @@ kaanoni_rank <- function(results,ranking='balanced') {
       consonance=c(x$evaluation$harmony,-consonance,x$changed_sources,x$movement,-overlap),
       overlap=c(x$evaluation$harmony,-overlap,x$changed_sources,x$movement,-consonance))
   }
-  keys <- do.call(rbind,lapply(results,key))
+  keys <- do.call(rbind,lapply(results,function(x) c(key(x),
+    if(is.null(x$boundary_movement)) 0 else x$boundary_movement)))
   results[do.call(order,as.data.frame(keys))]
 }
 
@@ -419,11 +444,8 @@ kaanoni_generate <- function(themes, options=kaanoni_options(), progress=NULL) {
         steps <- steps+1L; expanded <- expanded+1L; emit_progress('scan')
         voice <- length(frame$ids)+1L
         x <- get_variant(id,voice); n <- frame$notes
-        duplicate <- any(vapply(unique(n$voice),function(v) {
-          old <- n[n$voice==v,]
-          nrow(old)==nrow(x) && all(abs(old$onset-x$onset)<1e-8) &&
-            all(abs(old$duration-x$duration)<1e-8) && all(old$pitch==x$pitch)
-        },logical(1)))
+        duplicate <- any(vapply(unique(n$voice),function(v)
+          .same_octave_voice(n[n$voice==v,],x),logical(1)))
         if(duplicate) next
         if(!o$repair && any(x$pitch<o$ranges[[voice]][1] | x$pitch>o$ranges[[voice]][2])) next
         combined <- rbind(n,x)
@@ -508,8 +530,119 @@ kaanoni_generate <- function(themes, options=kaanoni_options(), progress=NULL) {
     repair_attempted=repair_attempted,options=o),class='kaanoni_result')
 }
 
+.phrase_boundary_movement <- function(parts) {
+  total <- 0
+  if(length(parts)<2) return(total)
+  for(i in 2:length(parts)) for(v in 1:2) {
+    prev <- parts[[i-1]]$notes;prev <- prev[prev$voice==v,]
+    next_notes <- parts[[i]]$notes;next_notes <- next_notes[next_notes$voice==v,]
+    total <- total+abs(prev$pitch[which.max(prev$onset)]-next_notes$pitch[which.min(next_notes$onset)])
+  }
+  total
+}
+
+# Kukin sae ratkaistaan erikseen; transpositio voidaan sitoa yhteiseksi tai valita saekohtaisesti.
+kaanoni_phrase_chain <- function(input,bars=5,options=kaanoni_options(),progress=NULL,same_transposition=TRUE) {
+  if(!is.logical(same_transposition) || length(same_transposition)!=1 || is.na(same_transposition)) stop('Tarkista yhteisen alkuintervallin valinta.')
+  if(length(unique(input$notes$voice))!=1L) stop('Valitse saekaanonille yksi syotemelodia.')
+  if(options$voices!=2L || options$mode!='canon') stop('Saekaanonitila tarvitsee kaksi aanta ja kaanonhaun.')
+  themes <- kaanoni_themes(input,bars=bars)
+  started <- proc.time()[3]; deadline <- started+options$seconds
+  all <- list(); tested <- 0L; limited <- FALSE; attempted <- 0L
+  groups <- if(same_transposition) unique(options$transpositions) else NA_real_
+  sub_budget <- options$seconds/(length(groups)*length(themes))
+  bind <- function(parts) {
+    columns <- unique(unlist(lapply(parts,names)))
+    parts <- lapply(parts,function(x) {for(k in setdiff(columns,names(x))) x[[k]] <- rep(NA,nrow(x));x[,columns,drop=FALSE]})
+    do.call(rbind,parts)
+  }
+  combine <- function(parts,transposition) {
+    cursor <- 0; notes <- settings <- errors <- changes <- list(); phrases <- list()
+    for(i in seq_along(parts)) {
+      r <- parts[[i]]; n <- r$notes; n$onset <- n$onset+cursor;n$phrase <- i
+      notes[[i]] <- n
+      settings[[i]] <- r$settings;settings[[i]]$phrase <- i;settings[[i]]$phrase_start <- cursor
+      e <- r$evaluation$errors;e$start <- e$start+cursor;e$end <- e$end+cursor;e$phrase <- rep(i,nrow(e));errors[[i]] <- e
+      changes[[i]] <- r$changes
+      phrases[[i]] <- list(number=i,theme=themes[[i]]$name,start=cursor,
+        first_measure=themes[[i]]$first_measure,evaluation=r$evaluation,settings=r$settings)
+      local_end <- max(r$notes$onset+r$notes$duration)
+      m <- tail(themes[[i]]$measures,1); bar <- m$numerator*4/m$denominator
+      # Saa sailyttaa lopputauon. Pidentynyt vasta-aihe ei saa menna seuraavan saetyksen paalle.
+      span <- themes[[i]]$span
+      cursor <- cursor+span+max(0,ceiling((local_end-span-1e-8)/bar))*bar
+    }
+    weights <- vapply(parts,function(r) r$evaluation$overlap,numeric(1))
+    cons <- vapply(parts,function(r) r$consonance,numeric(1));cons[!is.finite(cons)] <- 0
+    list(notes=bind(notes),settings=bind(settings),evaluation=list(errors=bind(errors),
+      harmony=sum(vapply(parts,function(r)r$evaluation$harmony,numeric(1))),hard=0,
+      overlap=sum(weights),sonority_count=sum(vapply(parts,function(r)r$evaluation$sonority_count,numeric(1))),
+      valid=all(vapply(parts,function(r)r$evaluation$valid,logical(1)))),
+      changes=bind(changes),changed_sources=sum(vapply(parts,function(r)r$changed_sources,numeric(1))),
+      changed_occurrences=sum(vapply(parts,function(r)r$changed_occurrences,numeric(1))),
+      movement=sum(vapply(parts,function(r)r$movement,numeric(1))),
+      consonance=if(sum(weights)>0) weighted.mean(cons,weights) else 0,
+      kind='phrase_chain',status='per_phrase',phrases=phrases,common_transposition=transposition,
+      phrase_transpositions=vapply(parts,function(r)r$settings$transposition[r$settings$voice==2],numeric(1)),
+      same_transposition=same_transposition,boundary_movement=.phrase_boundary_movement(parts))
+  }
+  for(p in groups) {
+    if(proc.time()[3]>=deadline || tested>=options$max_candidates) {limited<-TRUE;break}
+    pools <- list(); complete <- TRUE
+    for(i in seq_along(themes)) {
+      remaining <- deadline-proc.time()[3]
+      if(remaining<=0 || tested>=options$max_candidates) {limited<-TRUE;complete<-FALSE;break}
+      local <- options;local$transpositions <- if(same_transposition) p else options$transpositions
+      local$seconds <- min(remaining,sub_budget)
+      local$max_candidates <- options$max_candidates-tested
+      local$stop_after_results <- FALSE
+      callback <- if(is.null(progress)) NULL else function(event) {
+        event$stage <- 'phrases';event$theme <- i;event$themes <- length(themes)
+        event$elapsed <- unname(proc.time()[3]-started);event$seconds <- options$seconds
+        event$budget_fraction <- min(1,event$elapsed/options$seconds)
+        event$tested <- tested+event$tested;event$found <- length(all)
+        event$transposition <- p;progress(event)
+      }
+      r <- kaanoni_generate(themes[i],local,progress=callback)
+      attempted <- attempted+1L;tested <- tested+r$tested
+      if(r$status!='exhaustive') limited <- TRUE
+      if(!length(r$results)) {complete<-FALSE;break}
+      pools[[i]] <- r$results
+    }
+    if(!complete) next
+    # Rajattu yhdistelmavalikoima: parhaat loydetyt kokonaisuudet kasvavat sae kerrallaan.
+    paths <- lapply(pools[[1]],function(x)list(x))
+    if(length(pools)>1) for(i in 2:length(pools)) {
+      candidates <- unlist(lapply(paths,function(path)
+        lapply(pools[[i]],function(x)c(path,list(x)))),recursive=FALSE)
+      scores <- lapply(seq_along(candidates),function(k) {
+        path <- candidates[[k]]
+        w <- vapply(path,function(r)r$evaluation$overlap,numeric(1))
+        cs <- vapply(path,function(r)r$consonance,numeric(1));cs[!is.finite(cs)] <- 0
+        list(index=k,evaluation=list(harmony=sum(vapply(path,function(r)r$evaluation$harmony,numeric(1))),overlap=sum(w)),
+          changed_sources=sum(vapply(path,function(r)r$changed_sources,numeric(1))),
+          movement=sum(vapply(path,function(r)r$movement,numeric(1))),
+          consonance=if(sum(w)>0)weighted.mean(cs,w) else 0,
+          boundary_movement=.phrase_boundary_movement(path))
+      })
+      order <- vapply(head(kaanoni_rank(scores,options$ranking),options$max_results),function(x)x$index,integer(1))
+      paths <- candidates[order]
+    }
+    all <- c(all,lapply(paths,function(path)combine(path,p)))
+    if(isTRUE(options$stop_after_results) && length(all)>=options$max_results) break
+  }
+  found <- length(all)
+  all <- head(kaanoni_rank(all,options$ranking),options$max_results)
+  structure(list(results=all,options=options,tested=tested,found_total=found,
+    unchanged_found=sum(vapply(all,function(r)r$changed_sources==0,logical(1))),
+    repair_attempted=attempted,repair_limited=0,elapsed=unname(proc.time()[3]-started),
+    status=if(isTRUE(options$stop_after_results) && found>=options$max_results) 'result_limit' else
+      if(limited) 'search_limit' else 'phrase_search_complete',phrase_count=length(themes),phrase_bars=bars,same_transposition=same_transposition),class='kaanoni_result')
+}
+
 print.kaanoni_result <- function(x,...) {
   cat('Ratkaisuja:',length(x$results),' Tarkastettuja kokonaisuuksia:',x$tested,' Tila:',x$status,'\n')
+  if(!is.null(x$phrase_count)) cat('Sakeita kokonaisuudessa:',x$phrase_count,' Virheraja koskee kutakin saetta erikseen.\n')
   if(!is.null(x$found_total)) cat('Loytyi yhteensa:',x$found_total,
       ' Joista ilman korjauksia:',x$unchanged_found,'\n')
   if(isTRUE(x$options$repair)) cat('Korjaushaussa kasitelty:',x$repair_attempted,
@@ -521,7 +654,49 @@ print.kaanoni_result <- function(x,...) {
   invisible(x)
 }
 
-kaanoni_write <- function(result,path,gap_bars=1,time=c(4,4),tempo=60,best_n=NULL) {
+# Vientia varten: taydellinen rytmi ja saveljono verrataan, ei pelkkaa teeman nimea.
+kaanoni_export_voices <- function(notes,octaves=FALSE) {
+  voices <- sort(unique(notes$voice)); kept <- integer(); mapping <- list()
+  for(v in voices) {
+    a <- notes[notes$voice==v,]; a <- a[order(a$onset),]
+    representative <- v; shift <- 0
+    for(k in kept) {
+      b <- notes[notes$voice==k,]; b <- b[order(b$onset),]
+      if(nrow(a)!=nrow(b) || any(abs(a$onset-b$onset)>1e-8) ||
+         any(abs(a$duration-b$duration)>1e-8)) next
+      delta <- a$pitch-b$pitch
+      if(length(unique(delta))==1 && (delta[1]==0 || (octaves && delta[1]%%12==0))) {
+        representative <- k; shift <- delta[1]; break
+      }
+    }
+    if(representative==v) kept <- c(kept,v)
+    mapping[[length(mapping)+1L]] <- data.frame(original=v,representative=representative,
+      output=match(representative,kept),semitones=shift)
+  }
+  mapping <- do.call(rbind,mapping)
+  out <- notes[notes$voice %in% kept,]
+  out$voice <- match(out$voice,kept)
+  list(notes=out,mapping=mapping)
+}
+
+kaanoni_prepare_export <- function(result,merge_duplicates=TRUE,merge_octaves=FALSE) {
+  result$results <- lapply(result$results,function(r) {
+    converted <- kaanoni_export_voices(r$notes,octaves=merge_octaves)
+    if(!merge_duplicates) {
+      ids <- sort(unique(r$notes$voice))
+      converted <- list(notes=r$notes,mapping=data.frame(original=ids,
+        representative=ids,output=seq_along(ids),semitones=0))
+    }
+    r$export_notes <- converted$notes
+    r$voice_map <- converted$mapping
+    r$written_voices <- length(unique(converted$notes$voice))
+    r
+  })
+  result
+}
+
+kaanoni_write <- function(result,path,gap_bars=1,time=c(4,4),tempo=60,best_n=NULL,
+    merge_duplicates=TRUE,merge_octaves=FALSE) {
   if(!length(result$results)) stop('Ei vietavia ratkaisuja.')
   result$results <- kaanoni_rank(result$results,if(is.null(result$options$ranking)) 'balanced' else result$options$ranking)
   if(!is.null(best_n)) {
@@ -530,12 +705,24 @@ kaanoni_write <- function(result,path,gap_bars=1,time=c(4,4),tempo=60,best_n=NUL
     result$results <- head(result$results,best_n)
   }
   if(length(time)!=2 || any(time<=0) || gap_bars<0 || tempo<=0) stop('Virheelliset vientiasetukset.')
+  result <- kaanoni_prepare_export(result,merge_duplicates,merge_octaves)
   bar <- time[1]*4/time[2]; cursor <- 0; all <- list(); labels <- list()
   for(i in seq_along(result$results)) {
-    r <- result$results[[i]]; n <- r$notes
-    labels[[i]] <- data.frame(onset=cursor,text=paste0('Ratkaisu ',i,'; muutokset ',r$changed_sources,
+    r <- result$results[[i]]; n <- r$export_notes
+    labels[[length(labels)+1L]] <- data.frame(onset=cursor,text=paste0('Ratkaisu ',i,'; muutokset ',r$changed_sources,
       '/',r$changed_occurrences,'; virheet ',r$evaluation$harmony,'; ',
-      paste(apply(r$settings,1,function(s) paste(s,collapse='/')),collapse=' | ')))
+      paste(apply(r$settings,1,function(s) paste(s,collapse='/')),collapse=' | '),
+      '; kirjoitettu aania ',r$written_voices,'/',length(unique(r$notes$voice)),
+      if(any(r$voice_map$original!=r$voice_map$representative)) paste0('; yhdistetty ',
+        paste(with(subset(r$voice_map,original!=representative),
+          paste0(original,'->',representative,' (',semitones,' st)')),collapse=', ')) else ''))
+    if(!is.null(r$phrases) && length(r$phrases)>1) for(j in 2:length(r$phrases)) {
+      ph <- r$phrases[[j]]
+      labels[[length(labels)+1L]] <- data.frame(onset=cursor+ph$start,
+        text=paste0('Ratkaisu ',i,', sae ',j,'; transpositio ',ph$settings$transposition[ph$settings$voice==2],
+          '; virheet ',ph$evaluation$harmony,'; ',
+          paste(apply(ph$settings,1,function(s) paste(s,collapse='/')),collapse=' | ')))
+    }
     n$onset <- n$onset+cursor; n$solution <- i
     all[[i]] <- n[,c('onset','duration','pitch','voice','solution')]
     cursor <- ceiling((max(n$onset+n$duration)-1e-8)/bar)*bar+gap_bars*bar
@@ -549,7 +736,11 @@ kaanoni_write <- function(result,path,gap_bars=1,time=c(4,4),tempo=60,best_n=NUL
   saveRDS(result,paste0(path,'.rds'))
   report <- unlist(lapply(seq_along(result$results),function(i) {
     r <- result$results[[i]]
-    c(paste('Ratkaisu',i,'Tyyppi:',r$kind,'Korjaushaun tila:',r$status),capture.output(print(r$settings,row.names=FALSE)),
+    c('Virhe- ja muutosluvut kuvaavat alkuperaista hakuratkaisua ennen aanten yhdistamista.',
+      if(!is.null(r$phrase_transpositions)) paste('Sakeiden transpositiot:',paste(r$phrase_transpositions,collapse=', ')),
+      if(!is.null(r$boundary_movement)) paste('Saerajojen savelaskelliike yhteensa:',r$boundary_movement),
+      paste('Kirjoitettuja aania:',r$written_voices),capture.output(print(r$voice_map,row.names=FALSE)),
+      paste('Ratkaisu',i,'Tyyppi:',r$kind,'Korjaushaun tila:',r$status),capture.output(print(r$settings,row.names=FALSE)),
       paste('Yhteissointeja:',r$evaluation$sonority_count,'Laskutapa:',result$options$sonority_mode),
       paste('Muutettuja lahdesavelia:',r$changed_sources,'Nuottiesiintymia:',r$changed_occurrences),
       capture.output(print(r$changes,row.names=FALSE)),capture.output(print(r$evaluation$errors,row.names=FALSE)))

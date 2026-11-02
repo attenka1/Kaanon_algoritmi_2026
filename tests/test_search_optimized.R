@@ -43,7 +43,7 @@ for(sets in list(NULL,c(kaanoni_pc_key(c(60,64)),kaanoni_pc_key(60)))) {
   stopifnot(actual$status=='exhaustive',identical(sort(vapply(actual$results,function(x) hash(x$notes),character(1))),expected))
 }
 # Aikakarsinta ja nopean haun erillinen lopetustila.
-o <- kaanoni_options(voices=3,delays=c(1,20),transpositions=c(0,12),
+o <- kaanoni_options(voices=3,delays=c(1,2,20),transpositions=c(0,12),
   forbid_parallels=FALSE,stop_after_results=TRUE,max_results=1,seconds=3)
 r <- kaanoni_generate(t,o)
 stopifnot(r$status=='result_limit',r$found_total==1)

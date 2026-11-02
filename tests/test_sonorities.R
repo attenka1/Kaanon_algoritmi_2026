@@ -14,7 +14,7 @@ o$min_sonorities <- 5L
 stopifnot(!kaanoni_evaluate(a,o)$valid)
 # Kolmi- ja neliaanisessa lasketaan joko parit tai kaikkien aanten soinnut.
 for(v in 3:4) {
-  a <- do.call(rbind,lapply(seq_len(v),function(j) make(0:3,1,c(60,64,67,72)[j],j)))
+  a <- do.call(rbind,lapply(seq_len(v),function(j) make(0:3,1,c(60,64,67,71)[j],j)))
   o <- kaanoni_options(voices=v,forbid_parallels=FALSE,allowed_intervals=0:11,
     min_sonorities=4,sonority_mode='chords')
   e <- kaanoni_evaluate(a,o)

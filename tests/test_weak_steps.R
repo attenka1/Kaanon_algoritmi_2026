@@ -31,7 +31,7 @@ stopifnot(kaanoni_evaluate(b,o)$hard>0)
 # Sama saanto toimii jokaiselle aaniparille myos 3–4 aanessa.
 for(v in 3:4) {
   b <- a
-  for(j in 3:v) b <- rbind(b,data.frame(onset=0,duration=3,pitch=if(j==3)60 else 72,voice=j))
+  for(j in 3:v) b <- rbind(b,data.frame(onset=0,duration=3,pitch=if(j==3)60 else 67,voice=j))
   ov <- kaanoni_options(voices=v,allow_weak_steps=TRUE,forbid_parallels=FALSE,min_overlap=0)
   stopifnot(kaanoni_evaluate(b,ov)$valid)
 }
