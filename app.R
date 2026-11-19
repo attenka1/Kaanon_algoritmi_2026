@@ -65,6 +65,8 @@ ui <- function(request) {
     p('Aika-arvot mitataan neljasosina. MIDI-sävelkorkeus 60 = keski-C. Alkuperäinen syöte säilyy ennallaan.'),
     h4('Syöte'),verbatimTextOutput('input_summary'),
     h4('Haun tulos'),p('Haun aikana mittari näyttää vaiheen, ajan, nykyisen lähtöteeman, tutkitut ehdokkaat ja ratkaisujen määrän. Palkki kuvaa käytettyä aikabudjettia, ei kaikkien vaihtoehtojen valmistumisprosenttia.'),p('Haku vuorottelee lähtöteemojen välillä ja etsii ensin ilman sävelkorjauksia toimivat vaihtoehdot. Korjausaika jaetaan sen jälkeen ehdokkaiden kesken. Aikaraja voi jättää haun kesken.'),verbatimTextOutput('status'),tableOutput('summary'),
+    tags$details(tags$summary('Miksi ratkaisuja ei löytynyt? / Haun diagnostiikka'),
+      verbatimTextOutput('debug_info'),downloadButton('debug_download','Lataa debugraportti')),
     selectInput('selected','Tarkasteltava ratkaisu',choices=character()),
     tableOutput('settings'),tableOutput('changes'),tableOutput('errors_table'),
     plotOutput('piano',height='350px'),
@@ -142,7 +144,7 @@ server <- function(input,output,session) {
       ranking=if(is.null(input$ranking)) 'balanced' else input$ranking)
     r <- withProgress(message='Haku käynnistyy',value=0,{
       progress_callback <- function(p) {
-        stages <- c(phrases='Säekaanonien haku',start='Haku käynnistyy',scan='Teemayhdistelmien haku',
+        stages <- c(phrase_seed='Ensimmäinen ratkaisu jokaiselle säkeelle',phrase_improve='Säeratkaisujen parantaminen',phrases='Säekaanonien haku',start='Haku käynnistyy',scan='Teemayhdistelmien haku',
           repair='Sävelkorkeuksien korjaushaku',ranking='Tulosten järjestäminen',done='Haku päättynyt')
         detail <- sprintf('Aika %.0f / %.0f s · teema %d/%d · ehdokkaita %d · ratkaisuja %d',
           p$elapsed,p$seconds,p$theme,p$themes,p$tested,p$found)
@@ -177,6 +179,10 @@ server <- function(input,output,session) {
       else cat('Valituilla asetuksilla ei löytynyt ratkaisuja.\n')
     }
   })
+  output$debug_info <- renderText(paste(kaanoni_debug(result()),collapse='\n'))
+  output$debug_download <- downloadHandler(filename=function()'kaanoni-debug.txt',
+    contentType='text/plain; charset=utf-8',content=function(file) writeLines(kaanoni_debug(result()),file,useBytes=TRUE))
+  outputOptions(output,'debug_download',suspendWhenHidden=FALSE)
   output$summary <- renderTable({
     r <- result(); if(!length(r$results)) return(NULL)
     do.call(rbind,lapply(seq_along(r$results),function(i) {
@@ -199,13 +205,12 @@ server <- function(input,output,session) {
     # Vanhojen asiakkaiden ja testien oletus: koko palautettu tuloslista.
     if(is.null(count)) count <- length(r$results)
     req(length(count)==1 && is.finite(count) && count>=1 && count==floor(count))
-    r$results <- head(r$results,count)
     kaanoni_prepare_export(r,merge_duplicates=!identical(input$merge_duplicates,FALSE),
-      merge_octaves=isTRUE(input$merge_octaves))
+      merge_octaves=isTRUE(input$merge_octaves),best_n=count)
   })
   output$export_summary <- renderText({
     r <- export_result()
-    paste('Tiedostoon viedään',length(r$results),'parasta ratkaisua. Paras on ensimmäisenä.')
+    paste('Tiedostoon viedään',length(r$results),'parasta erillistä ratkaisua. Paras on ensimmäisenä.')
   })
   export <- function(file,ext) {
     p <- tempfile(fileext=ext); on.exit(unlink(c(p,paste0(p,'.txt'),paste0(p,'.rds'))))

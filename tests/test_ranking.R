@@ -24,5 +24,17 @@ for(ext in c('mid','musicxml')) {
  stopifnot(length(exported$results)==2,identical(original_results,expected))
  stopifnot(nrow(kaanoni_read(path)$notes)==sum(vapply(expected,function(x)nrow(x$notes),integer(1))))
 }
+# Vaihdetut ääninumerot ja ylimääräinen alkuhiljaisuus eivät vie vientipaikkaa.
+first <- expected[[1]]
+copy <- first
+copy$notes$voice <- 3L-copy$notes$voice
+copy$notes$onset <- copy$notes$onset+4
+r$results <- list(first,copy,expected[[2]])
+path <- file.path(folder,'unique.mid')
+kaanoni_write(r,path,best_n=2)
+exported <- readRDS(paste0(path,'.rds'))$results
+stopifnot(length(exported)==2,
+  identical(lapply(exported,function(x)x$notes),lapply(expected,function(x)x$notes)),
+  nrow(kaanoni_read(path)$notes)==sum(vapply(expected,function(x)nrow(x$notes),integer(1))))
 unlink(folder,recursive=TRUE)
 cat('Hyvyysjarjestys ja vain parhaiden vienti OK\n')

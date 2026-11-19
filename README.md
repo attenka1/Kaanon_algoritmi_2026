@@ -24,7 +24,9 @@ Valinta **Sama alkuintervalli kaikissa säkeissä** on oletuksena käytössä. K
 
 Säkeet yhdistetään yhdeksi MIDI- tai MusicXML-ratkaisuksi ilman ylimääräisiä välitaukoja, kun vastaääni mahtuu säejaksoon. Jos vastaäänen viive tai augmentaatio pidentää säettä jakson yli, seuraava säe aloitetaan vasta edellisen molempien äänten loputtua seuraavalta vapaalta tahtirajalta. Näin nuotit eivät mene saman stemman sisällä päällekkäin. Alkuperäisiä nuottikestoja ei lyhennetä. Ratkaisujen välinen vientitauko koskee kokonaisia säeketjuja.
 
-Kaikille säkeille on löydyttävä ratkaisu valitun intervalliperiaatteen mukaan; keskeneräistä ketjua ei palauteta kokonaisena ratkaisuna. Kokonaisaika ja ehdokasraja jaetaan säehakujen kesken. Aikarajalla tyhjä tulos ei todista, ettei yhteistä transpositiota voisi löytyä. Yhdistelmiä pidetään rajattu, hyvyysjärjestyksessä valittu määrä: tämä on löytyneiden säeratkaisujen yhdistely, ei kaikkien mahdollisten ketjujen tyhjentävä optimointi. `phrase_search_complete` tarkoittaa säekohtaisten hakujen valmistumista valituilla rajoilla; `search_limit` kertoo kesken jääneistä hauista.
+Kaikille säkeille on löydyttävä ratkaisu valitun intervalliperiaatteen mukaan; keskeneräistä ketjua ei palauteta kokonaisena ratkaisuna. Säehaku etenee kahdessa vaiheessa. Ensin `first_solution`-kierros etsii vain yhden hyväksyttävän vaihtoehdon kullekin säkeelle ja jakaa sekä ajan että ehdokasbudjetin jäljellä olevien säehakujen kesken. Kun kaikki säkeet on ratkaistu, ensimmäinen kokonainen ketju säilytetään heti. Vasta sen jälkeen `improvement`-kierros käyttää jäljellä olevan budjetin lisävaihtoehtoihin ja hyvyysjärjestyksen parantamiseen. Lisähaku ei voi hävittää jo löydettyä kokonaista ratkaisua. Yhteistä transpositiota vaativassa tilassa tämä tehdään kullekin kokeiltavalle transpositiolle; vaihtuvassa tilassa kaikille säkeille etsitään ensin ratkaisu sallituista intervalleista.
+
+Debugraportissa ensimmäisen kierroksen `result_limit` tarkoittaa onnistunutta pysäytystä yhden paikallisen ratkaisun löydyttyä. Raportti näyttää myös ensimmäisen kokonaisen ketjun löytymisajan. Koko haun lopetussyy erottaa `candidate_limit`-ehdokasrajan ja `scan_time_limit`-aikarajan paikallisten hakujen kesken jäämisestä. Aikarajalla tyhjä tulos ei todista, ettei yhteistä transpositiota voisi löytyä. Yhdistelmiä pidetään rajattu, hyvyysjärjestyksessä valittu määrä: tämä on löytyneiden säeratkaisujen yhdistely, ei kaikkien mahdollisten ketjujen tyhjentävä optimointi. `phrase_search_complete` tarkoittaa säekohtaisten hakujen valmistumista valituilla rajoilla; `search_limit` kertoo kesken jääneistä hauista.
 
 R-rajapinta: `kaanoni_phrase_chain(syote, bars=5, options=kaanoni_options(voices=2, mode='canon', max_harmony_errors=2), same_transposition=FALSE)` (TRUE pitää alkuintervallin yhteisenä). Tulos on tavallinen vientikelpoinen tulosolio; kunkin kokonaisuuden `phrases`-kenttä sisältää erillisten säkeiden ajat, asetukset ja arviot. MusicXML- ja MIDI-merkinnät näyttävät myös myöhempien säkeiden alut. Kaikki uudet käyttöliittymävalinnat tallentuvat asetuksiin.
 
@@ -59,6 +61,16 @@ Teemamuunnokset muodostetaan laiskasti ja säilytetään muistissa. Jo valittuje
 Valintaruutu **Pysäytä, kun enimmäismäärä ratkaisuja on löytynyt** (`stop_after_results=TRUE`) lopettaa haun heti ratkaisumäärän täyttyessä. Tila on tällöin `result_limit`. Oletuksena valinta on pois päältä, jolloin haku käyttää annetut rajat ja järjestää löydetyt ratkaisut kuten aiemmin. Nopea pysäytys ei lupaa löytää koko hakuavaruuden parhaita ratkaisuja.
 
 Tulosolion `stats` kertoo käydyt lähtöteemat, muunnos- ja parivälimuistien osumat sekä aikakarsintojen määrän. Automaattinen vertailutesti varmistaa pienissä 2–4-äänisissä hauissa samat ratkaisut kuin kaikkien kokonaisten yhdistelmien suorassa läpikäynnissä.
+
+## Miksi ratkaisuja ei löydy?
+
+Tulosten alla avautuva **Miksi ratkaisuja ei löytynyt? / Haun diagnostiikka** näyttää lopetussyyn, käytetyt rajat, käydyt lähtöteemat ja yleisimmät karsintasyyt: kaksinnukset, ääniala, yhteissoinnin kesto ja lukumäärä, rinnakkaisliikkeet, risteämiset, hypyt ja harmoniavirheraja. Esimerkeissä näkyvät teema, lisättävä ääni, muunnos, rytmikerroin, viive, transpositio sekä mahdollinen virheen aika neljäsosina teeman/säkeen alusta.
+
+Luvut kuvaavat haun karsittuja osahaaroja, eivät koko hakuavaruuden hylättyjen lopullisten ratkaisujen määrää. Varhaisessa karsinnassa kirjataan ensimmäinen ratkaiseva syy; samalla ehdokkaalla voi olla muitakin ongelmia. Välimuistissa olevankin päätöksen käyttö uudessa haarassa lasketaan kyseisen haaran karsinnaksi. Esimerkkejä säilytetään rajattu määrä, jotta lokitus ei kasva rajatta.
+
+Säekaanonitilassa raportti näyttää jokaisen tehdyn säehaun alkuperäisen aloitustahdin, transposition (NA = vaihtuvat vaihtoehdot), ehdokas- ja ratkaisumäärät sekä lopetussyyn. Nollaan jäänyt säe estää koko ketjun muodostumisen. Kesken jäänyt säehaku ei todista ratkaisua mahdottomaksi; myöhempiä säkeitä ei välttämättä ole ehditty tutkia.
+
+**Lataa debugraportti** toimii myös silloin, kun ratkaisuja on nolla. R-rajapinnassa vastaavat tiedot saa `kaanoni_debug(tulos)`-funktiolla tai `tulos$diagnostics`-kentästä. Vanhoista ennen tämän ominaisuuden lisäämistä syntyneistä tuloksista tietoja ei voida palauttaa jälkikäteen.
 
 ## Haun seuranta
 
@@ -169,6 +181,8 @@ Rscript tests/test_export_voices.R
 Rscript tests/test_octave_rule.R
 Rscript tests/test_phrase_chain.R
 Rscript tests/test_parallel_gaps.R
+Rscript tests/test_diagnostics.R
+Rscript tests/test_phrase_coverage.R
 ```
 
 Testit kattavat teemajaon ja lopputauot, O/I/R/RI-muunnokset, rytmikertoimet, harmoniaa ja rinnakkaisliikettä, tiukan kaanonin korjauksen, 2–4 ääntä sekä MIDI- ja MusicXML-takaisinluvun. Automaattiset testit eivät vielä korvaa MusicXML:n ulkoista nuotinnusohjelmassa tehtävää visuaalista tarkistusta.

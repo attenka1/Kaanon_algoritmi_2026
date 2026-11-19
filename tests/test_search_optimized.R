@@ -1,5 +1,5 @@
 source('R/kaanoni.R')
-hash <- function(n) paste(n$voice,n$onset,n$duration,n$pitch,collapse=';')
+hash <- .solution_key
 # Vertailu: kaikki kokonaiset yhdistelmat suoraan, ilman pari- tai aikakarsintaa.
 brute <- function(themes,o) {
   found <- character()

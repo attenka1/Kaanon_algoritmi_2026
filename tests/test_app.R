@@ -46,6 +46,8 @@ shiny::testServer(server, {
   stopifnot(inherits(error,'shiny.silent.error'),
             !grepl('subscript out of bounds',conditionMessage(error),fixed=TRUE))
   stopifnot(grepl('ei löytynyt',output$status,fixed=TRUE))
+  report <- output$debug_download
+  stopifnot(file.exists(report),any(grepl('Liian vahan yhteissointeja',readLines(report),fixed=TRUE)))
   for(id in c('settings','changes','errors_table','piano')) {
     value <- tryCatch(output[[id]],error=identity)
     stopifnot(!inherits(value,'error') || inherits(value,'shiny.silent.error'))
